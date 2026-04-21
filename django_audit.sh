@@ -13,7 +13,9 @@ if [ -f "${ENV_FILE}" ]; then
   set +a
 fi
 
-BASE_DIR="${BASE_DIR:-/home/dieter/djangodev}"
+CURRENT_USER="$(id -un)"
+
+BASE_DIR="${BASE_DIR:-/home/${CURRENT_USER}/djangodev}"
 AUDIT_VENV="${AUDIT_VENV:-${SCRIPT_DIR}/.audit-venv}"
 AUDIT_PYTHON="${AUDIT_PYTHON:-${AUDIT_VENV}/bin/python}"
 AUDIT_SCRIPT="${AUDIT_SCRIPT:-${SCRIPT_DIR}/django_audit.py}"
@@ -22,7 +24,7 @@ export BASE_DIR
 export AUDIT_VENV
 export AUDIT_PYTHON
 export AUDIT_SCRIPT
-export NVM_DIR="${NVM_DIR:-/home/dieter/.nvm}"
+export NVM_DIR="${NVM_DIR:-/home/${CURRENT_USER}/.nvm}"
 export PATH="${EXTRA_PATH:-}${EXTRA_PATH:+:}${PATH:-/usr/local/bin:/usr/bin:/bin}"
 
 if [ ! -f "${CONFIG_FILE}" ]; then
