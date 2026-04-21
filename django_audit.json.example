@@ -1,13 +1,13 @@
 {
   "mail": {
-    "to": "",
-    "from_template": "django-audit@{hostnam}",
+    "to": "admin@example.com",
+    "from_template": "django-audit@{hostname}",
     "subject_template": "[Django Audit] {hostname} - consolidated dependency overview",
     "smtp_host": "localhost",
     "smtp_port": 25
   },
   "reports": {
-    "report_dir": ""
+    "report_dir": "reports"
   },
   "python_release_catalog_url": "https://endoflife.date/api/python.json",
   "projects": [
@@ -26,7 +26,7 @@
         "project2_dir/requirements.txt",
         "project2_dir/requirements2.txt"
       ],
-      "django_dir": "project2_dir_django"
+      "django_dir": "project2_dir_django",
       "frontend_dir": "project2_dir/frontend"
     }
   ]
