@@ -16,7 +16,7 @@ if [ -f "${ENV_FILE}" ]; then
   set +a
 fi
 
-PROJECT_ROOT_DIR="${PROJECT_ROOT_DIR:-djangodev}"
+PROJECT_ROOT_DIR="${PROJECT_ROOT_DIR:-myprojects}"
 BASE_DIR="${BASE_DIR:-/home/${CURRENT_USER}/${PROJECT_ROOT_DIR}}"
 
 AUDIT_VENV="${AUDIT_VENV:-${BASE_DIR}/scripts/.audit-venv}"
