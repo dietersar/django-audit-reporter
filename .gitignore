@@ -1,0 +1,10 @@
+*.env
+!.env.example
+*.log
+__pycache__/
+*.pyc
+.audit-venv/
+.venv/
+node_modules/
+reports/
+dist/
