@@ -15,7 +15,7 @@ fi
 
 CURRENT_USER="$(id -un)"
 
-BASE_DIR="${BASE_DIR:-/home/${CURRENT_USER}/djangodev}"
+BASE_DIR="${BASE_DIR:-/home/${CURRENT_USER}}"
 AUDIT_VENV="${AUDIT_VENV:-${SCRIPT_DIR}/.audit-venv}"
 AUDIT_PYTHON="${AUDIT_PYTHON:-${AUDIT_VENV}/bin/python}"
 AUDIT_SCRIPT="${AUDIT_SCRIPT:-${SCRIPT_DIR}/django_audit.py}"
