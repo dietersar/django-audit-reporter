@@ -375,6 +375,168 @@ def status_label(status: str):
         "unknown": "unknown",
     }.get(status, status)
 
+# -----------------------------------------------------------------------------
+# Additional helpers for Python runtime analysis and presentation
+#
+# These functions implement a more compact and consolidated view of Python
+# version declarations across multiple sources. They compute the recommended
+# Python release, group sources that resolve to the same effective version
+# and lifecycle state, and generate badges and notes for display in the
+# reports. See the README for details.
+
+def supported_python_cycles(catalog):
+    """
+    Return a list of supported Python release cycles sorted by version.
+    A cycle is considered supported if its status is bugfix or security.
+    """
+    items = []
+    today = NOW.strftime("%Y-%m-%d")
+    for row in catalog.get("items", []):
+        cycle = row.get("cycle")
+        if not cycle:
+            continue
+        eol = row.get("eol")
+        support = row.get("support")
+        status = "unknown"
+        if isinstance(eol, str) and eol and eol < today:
+            status = "end-of-life"
+        elif isinstance(support, str) and support:
+            status = "security" if support < today else "bugfix"
+        elif support is False:
+            status = "end-of-life"
+        if status in {"bugfix", "security"}:
+            item = dict(row)
+            item["status"] = status
+            items.append(item)
+    return sorted(items, key=lambda x: version_tuple(x.get("cycle", "")))
+
+
+def recommended_python_release(catalog):
+    """
+    Determine the recommended Python release.
+    Prefer the most recent bugfix release; if none, fall back to the most
+    recent supported release.
+    """
+    supported = supported_python_cycles(catalog)
+    bugfix = [x for x in supported if x.get("status") == "bugfix"]
+    if bugfix:
+        return sorted(bugfix, key=lambda x: version_tuple(x.get("cycle", "")))[-1]
+    return supported[-1] if supported else None
+
+
+def compact_runtime_notes(src_row):
+    """
+    Produce a list of short notes for a runtime source row based on its issues and
+    status. These notes are used for the compact text and badge display.
+    """
+    notes = []
+    issues = src_row.get("issues") or []
+    # note for patch availability
+    if "patch update available" in issues:
+        notes.append("Patch update available")
+    else:
+        # note for being current in branch
+        if src_row.get("status") in {"bugfix", "security"} and src_row.get("normalized") and src_row.get("latest"):
+            if compare_versions(src_row["normalized"], src_row["latest"]) == 0:
+                branch = src_row.get("cycle", "-")
+                notes.append(f"Current in {branch} branch")
+    # note for upgrade suggestion
+    if any("newer supported branch available" in issue for issue in issues):
+        rec = src_row.get("recommended_latest") or src_row.get("recommended_cycle") or ""
+        if rec:
+            notes.append(f"Upgrade available to {rec}")
+    # include original note
+    if src_row.get("note"):
+        notes.append(src_row["note"])
+    return notes
+
+
+def group_python_runtime_sources(sources):
+    """
+    Group Python runtime source entries by their declared value and effective
+    status. This merges multiple sources (e.g., interpreter and .python-version)
+    that resolve to the same version and lifecycle state. Notes are aggregated
+    but not used to differentiate groups, so identical versions consolidate
+    even if their notes differ.
+    """
+    grouped = {}
+    for src in sources:
+        lifecycle = status_label(src.get("status"))
+        recommended_display = src.get("recommended_latest") or src.get("recommended_cycle") or "-"
+        key = (
+            src.get("value") or "",
+            lifecycle,
+            recommended_display,
+            tuple(sorted(src.get("issues") or [])),
+        )
+        # compute notes for this individual row (but do not include in key)
+        row_notes = compact_runtime_notes(src)
+        row = grouped.setdefault(
+            key,
+            {
+                "sources": [],
+                "paths": [],
+                "declared": src.get("value") or "-",
+                "lifecycle": lifecycle,
+                "recommended": recommended_display,
+                "issues": list(src.get("issues") or []),
+                "notes": set(),
+            },
+        )
+        row["sources"].append(src.get("source") or "-")
+        row["paths"].append(src.get("path") or "-")
+        # merge notes across grouped items
+        for note in row_notes:
+            row["notes"].add(note)
+    result = []
+    for row in grouped.values():
+        result.append(
+            {
+                "sources": row["sources"],
+                "paths": row["paths"],
+                "declared": row["declared"],
+                "lifecycle": row["lifecycle"],
+                "recommended": row["recommended"],
+                "issues": row["issues"],
+                "notes": sorted(row["notes"]),
+            }
+        )
+    result.sort(key=lambda x: (x["declared"], ", ".join(x["sources"])))
+    return result
+
+
+def lifecycle_badge(lifecycle):
+    """
+    Generate a colored badge for a lifecycle status.
+    """
+    lifecycle_lower = (lifecycle or "unknown").lower()
+    if lifecycle_lower == "bugfix":
+        return style_badge("Fully supported", "ok")
+    if lifecycle_lower == "security-only":
+        return style_badge("Security-only", "warn")
+    if lifecycle_lower == "end-of-life":
+        return style_badge("End-of-life", "bad")
+    return style_badge(lifecycle or "unknown", "info")
+
+
+def runtime_note_badges(notes):
+    """
+    Convert a list of runtime notes into styled badges. Returns a hyphen if
+    there are no notes.
+    """
+    if not notes:
+        return "-"
+    badges = []
+    for note in notes:
+        kind = "info"
+        lower = note.lower()
+        if "current in" in lower:
+            kind = "ok"
+        elif "upgrade available" in lower or "patch update" in lower:
+            kind = "warn"
+        badges.append(style_badge(note, kind))
+    return "".join(badges)
+
 
 def fetch_python_release_catalog():
     url = CONFIG.get("python_release_catalog_url", "https://endoflife.date/api/python.json")
@@ -429,21 +591,34 @@ def parse_python_value(raw_value: str):
 
 
 def detect_python_runtime_sources(project_dir: Path, project_python: Path, catalog):
+    """
+    Examine all declared Python version sources for a project and determine their
+    lifecycle status, patch currency, and recommended upgrade path. The result
+    includes both raw source rows and grouped/merged rows for display.
+    """
     sources = []
 
     def add_source(path: Path, label: str, value: str, note: str = ""):
         parsed = parse_python_value(value)
         cycle = parsed["cycle"]
         release = python_release_info(catalog, cycle) if cycle else None
-        latest = release.get("latest", "") if release else ""
+        latest_branch = release.get("latest", "") if release else ""
         status = release.get("status", "unknown") if release else "unknown"
+        recommended = recommended_python_release(catalog)
+        recommended_cycle = recommended.get("cycle", "") if recommended else ""
+        recommended_latest = recommended.get("latest", "") if recommended else ""
         issues = []
-        if parsed["is_exact"] and latest and compare_versions(parsed["normalized"], latest) < 0:
+        # warn if a newer patch is available for this branch
+        if parsed["is_exact"] and latest_branch and compare_versions(parsed["normalized"], latest_branch) < 0:
             issues.append("patch update available")
+        # warn on unsupported or security branches
         if status == "end-of-life":
             issues.append("unsupported Python branch")
         elif status == "security":
             issues.append("security-fixes-only branch")
+        # suggest upgrade if the declared cycle is older than recommended
+        if cycle and recommended_cycle and version_tuple(cycle) < version_tuple(recommended_cycle):
+            issues.append("newer supported branch available")
         sources.append(
             {
                 "source": label,
@@ -453,17 +628,24 @@ def detect_python_runtime_sources(project_dir: Path, project_python: Path, catal
                 "cycle": cycle,
                 "kind": parsed["kind"],
                 "is_exact": parsed["is_exact"],
-                "latest": latest,
+                "latest": latest_branch,
+                "recommended_cycle": recommended_cycle,
+                "recommended_latest": recommended_latest,
                 "status": status,
                 "issues": issues,
                 "note": note,
             }
         )
 
+    # interpreter version from the project's Python
+    interpreter_note = ""
     actual_version = get_python_interpreter_version(project_python)
     if actual_version:
-        add_source(project_python, "interpreter", actual_version, "Version from the Python used for this app audit")
+        # record the interpreter note separately; do not include it in grouping
+        interpreter_note = f"Python version used is from {project_python}"
+        add_source(project_python, "interpreter", actual_version, "")
 
+    # parse version declarations in common files
     simple_files = [
         (project_dir / ".python-version", ".python-version"),
         (project_dir / ".tool-versions", ".tool-versions"),
@@ -474,7 +656,6 @@ def detect_python_runtime_sources(project_dir: Path, project_python: Path, catal
         (project_dir / "setup.cfg", "setup.cfg"),
         (project_dir / "Dockerfile", "Dockerfile"),
     ]
-
     for path, label in simple_files:
         if not path.exists() or not path.is_file():
             continue
@@ -532,6 +713,7 @@ def detect_python_runtime_sources(project_dir: Path, project_python: Path, catal
         if value:
             add_source(path, label, value, note)
 
+    # extract python-version from GitHub Actions workflows
     workflows_dir = project_dir / ".github" / "workflows"
     if workflows_dir.exists():
         for workflow in sorted(workflows_dir.glob("*.y*ml")):
@@ -545,6 +727,7 @@ def detect_python_runtime_sources(project_dir: Path, project_python: Path, catal
                     add_source(workflow, f"workflow:{workflow.name}", value, "GitHub Actions python-version")
                     break
 
+    # top-level issues across sources
     exact_cycles = sorted({s["cycle"] for s in sources if s.get("cycle")})
     exact_versions = sorted({s["normalized"] for s in sources if s.get("normalized") and s.get("is_exact")}, key=version_tuple)
     issues = []
@@ -555,6 +738,7 @@ def detect_python_runtime_sources(project_dir: Path, project_python: Path, catal
     if not sources:
         issues.append("no Python version declaration files found")
 
+    # compute highest risk across all sources
     highest_risk = "ok"
     for src in sources:
         if "unsupported Python branch" in src["issues"]:
@@ -565,7 +749,17 @@ def detect_python_runtime_sources(project_dir: Path, project_python: Path, catal
     if issues and highest_risk == "ok":
         highest_risk = "warn"
 
-    return {"catalog_ok": catalog.get("ok", False), "catalog_error": catalog.get("error", ""), "sources": sources, "issues": issues, "highest_risk": highest_risk}
+    # group sources for presentation
+    grouped = group_python_runtime_sources(sources)
+    return {
+        "catalog_ok": catalog.get("ok", False),
+        "catalog_error": catalog.get("error", ""),
+        "sources": sources,
+        "grouped_sources": grouped,
+        "issues": issues,
+        "highest_risk": highest_risk,
+        "interpreter_note": interpreter_note,
+    }
 
 
 def find_nvm_bin_dirs():
@@ -1145,7 +1339,15 @@ for app in results:
     runtime = app["python_runtime"]
     text_lines.append("")
     text_lines.append("Python runtime/version sources:")
-    if runtime["sources"]:
+    # use grouped sources when available for a concise view
+    if runtime.get("grouped_sources"):
+        for row in runtime["grouped_sources"]:
+            sources_label = ", ".join(row["sources"])
+            notes_text = "; ".join(row["notes"]) if row["notes"] else "-"
+            text_lines.append(
+                f"  - {sources_label}: declared={row['declared']} | lifecycle={row['lifecycle']} | recommended={row['recommended']} | notes={notes_text}"
+            )
+    elif runtime["sources"]:
         for src_row in runtime["sources"]:
             latest = src_row.get("latest") or "-"
             status = status_label(src_row.get("status"))
@@ -1158,12 +1360,17 @@ for app in results:
                 text_lines.append(f"      note: {src_row['note']}")
     else:
         text_lines.append("  - No Python version sources detected")
-    if runtime["issues"]:
+    # include summary-level runtime issues or catalog errors
+    if runtime.get("issues"):
         text_lines.append("Python runtime issues:")
         for issue in runtime["issues"]:
             text_lines.append(f"  - {issue}")
     elif runtime.get("catalog_error"):
         text_lines.append(f"Python runtime note: release catalog lookup failed: {runtime['catalog_error']}")
+
+    # add note about interpreter origin if present
+    if runtime.get("interpreter_note"):
+        text_lines.append(runtime["interpreter_note"])
 
     if app["vulnerabilities"]:
         sev_summary = ", ".join(
@@ -1338,11 +1545,13 @@ for app in results:
         badges.append(style_badge("No manage.py", "info"))
 
     runtime_issue_count = len(runtime.get("issues") or []) + sum(1 for x in runtime.get("sources", []) if x.get("issues"))
-    badges.append(style_badge(f"{app['outdated_other_count']} other outdated Python", "warn" if app["outdated_other_count"] else "info"))
+    # when no other outdated packages, use "ok" instead of "info" to show success
+    badges.append(style_badge(f"{app['outdated_other_count']} other outdated Python", "warn" if app["outdated_other_count"] else "ok"))
     badges.append(style_badge(f"{runtime_issue_count} Python runtime issues", "warn" if runtime_issue_count else "ok"))
     if frontend["enabled"]:
         badges.append(style_badge(f"{frontend['vuln_count']} vulnerable npm" if frontend["vuln_count"] else "No vulnerable npm packages", "bad" if frontend["vuln_count"] else "ok"))
-        badges.append(style_badge(f"{frontend['outdated_other_count']} other outdated npm", "warn" if frontend["outdated_other_count"] else "info"))
+        # similarly switch to "ok" when zero outdated npm packages
+        badges.append(style_badge(f"{frontend['outdated_other_count']} other outdated npm", "warn" if frontend["outdated_other_count"] else "ok"))
 
     html.append("<div style='display:flex;gap:8px;flex-wrap:wrap;'>" + "".join(badges) + "</div>")
     html.append("</div>")
@@ -1353,37 +1562,61 @@ for app in results:
     html.append("</ul></div>")
 
     html.append("<div style='margin-top:18px;'><div style='font-size:16px;font-weight:700;margin-bottom:10px;color:#1d4ed8;'>Python runtime / version files</div>")
-    if runtime["sources"]:
+    # prepare rows using grouped sources for a compact table
+    runtime_rows = runtime.get("grouped_sources") or []
+    if runtime_rows:
         html.append(
-            "<table style='width:100%;border-collapse:collapse;font-size:14px;'><thead><tr style='background:#f8fafc;'>"
-            "<th style='text-align:left;padding:10px;border-bottom:1px solid #e2e8f0;'>Source</th>"
+            "<table style='width:100%;border-collapse:collapse;font-size:14px;'>"
+            "<thead><tr style='background:#f8fafc;'>"
+            "<th style='text-align:left;padding:10px;border-bottom:1px solid #e2e8f0;'>Sources</th>"
             "<th style='text-align:left;padding:10px;border-bottom:1px solid #e2e8f0;'>Declared</th>"
-            "<th style='text-align:left;padding:10px;border-bottom:1px solid #e2e8f0;'>Normalized</th>"
-            "<th style='text-align:left;padding:10px;border-bottom:1px solid #e2e8f0;'>Latest</th>"
-            "<th style='text-align:left;padding:10px;border-bottom:1px solid #e2e8f0;'>Status</th>"
-            "<th style='text-align:left;padding:10px;border-bottom:1px solid #e2e8f0;'>Issues</th>"
+            "<th style='text-align:left;padding:10px;border-bottom:1px solid #e2e8f0;'>Lifecycle</th>"
+            "<th style='text-align:left;padding:10px;border-bottom:1px solid #e2e8f0;'>Recommended upgrade</th>"
+            "<th style='text-align:left;padding:10px;border-bottom:1px solid #e2e8f0;'>Notes</th>"
             "</tr></thead><tbody>"
         )
-        for src_row in runtime["sources"]:
+        for row in runtime_rows:
+            # assemble source lines with path information
+            source_lines = []
+            for idx, source_name in enumerate(row["sources"]):
+                path_text = row["paths"][idx] if idx < len(row["paths"]) else ""
+                source_lines.append(
+                    f"<div style='margin-bottom:6px;'><b>{escape(source_name)}</b>"
+                    + (f"<div style='font-size:12px;color:#64748b;margin-top:2px;'>{escape(path_text)}</div>" if path_text else "")
+                    + "</div>"
+                )
+            lifecycle_html = lifecycle_badge(row["lifecycle"])
+            notes_html = runtime_note_badges(row["notes"])
             html.append(
                 "<tr>"
-                f"<td style='padding:10px;border-bottom:1px solid #eef2f7;vertical-align:top;'><b>{escape(src_row['source'])}</b><div style='font-size:12px;color:#64748b;margin-top:4px;'>{escape(src_row['path'])}</div></td>"
-                f"<td style='padding:10px;border-bottom:1px solid #eef2f7;vertical-align:top;'><code>{escape(src_row['value'] or '-')}</code></td>"
-                f"<td style='padding:10px;border-bottom:1px solid #eef2f7;vertical-align:top;'><code>{escape(src_row.get('normalized') or '-')}</code></td>"
-                f"<td style='padding:10px;border-bottom:1px solid #eef2f7;vertical-align:top;'><code>{escape(src_row.get('latest') or '-')}</code></td>"
-                f"<td style='padding:10px;border-bottom:1px solid #eef2f7;vertical-align:top;'>{escape(status_label(src_row.get('status')))}</td>"
-                f"<td style='padding:10px;border-bottom:1px solid #eef2f7;vertical-align:top;'>{escape(', '.join(src_row.get('issues') or []) or '-')}</td>"
+                f"<td style='padding:10px;border-bottom:1px solid #eef2f7;vertical-align:top;'>{''.join(source_lines)}</td>"
+                f"<td style='padding:10px;border-bottom:1px solid #eef2f7;vertical-align:top;'><code>{escape(row['declared'] or '-')}</code></td>"
+                f"<td style='padding:10px;border-bottom:1px solid #eef2f7;vertical-align:top;'>{lifecycle_html}</td>"
+                f"<td style='padding:10px;border-bottom:1px solid #eef2f7;vertical-align:top;'><code>{escape(row['recommended'] or '-')}</code></td>"
+                f"<td style='padding:10px;border-bottom:1px solid #eef2f7;vertical-align:top;display:flex;gap:6px;flex-wrap:wrap;'>{notes_html}</td>"
                 "</tr>"
             )
-            if src_row.get("note"):
-                html.append(
-                    "<tr><td colspan='6' style='padding:8px 10px 12px 10px;border-bottom:1px solid #eef2f7;font-size:13px;color:#475569;'>"
-                    f"<b>Note:</b> {escape(src_row['note'])}</td></tr>"
-                )
         html.append("</tbody></table>")
+        # explanatory note for grouped table
+        html.append(
+            "<div style='margin-top:10px;padding:12px 14px;background:#eff6ff;border:1px solid #bfdbfe;border-radius:12px;color:#1e40af;font-size:13px;'>"
+            "Declared Python sources with the same effective version state are grouped together."
+            "</div>"
+        )
+        # optional note about interpreter source; displayed outside table for clarity
+        if runtime.get("interpreter_note"):
+            html.append(
+                f"<div style='margin-top:6px;font-size:13px;color:#374151;'>{escape(runtime['interpreter_note'])}</div>"
+            )
     else:
         html.append("<div style='padding:12px 14px;background:#eff6ff;border:1px solid #bfdbfe;border-radius:12px;color:#1d4ed8;'>No Python version declaration files detected.</div>")
-    if runtime["issues"]:
+        # show interpreter note even when no version files were detected
+        if runtime.get("interpreter_note"):
+            html.append(
+                f"<div style='margin-top:6px;font-size:13px;color:#374151;'>{escape(runtime['interpreter_note'])}</div>"
+            )
+    # display high-level runtime issues or catalog errors
+    if runtime.get("issues"):
         html.append("<ul style='margin:12px 0 0 20px;padding:0;'>")
         for issue in runtime["issues"]:
             html.append(f"<li style='margin-bottom:6px;color:#92400e;'>{escape(issue)}</li>")
